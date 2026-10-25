@@ -85,8 +85,10 @@ jobs:
 
           | 文件 | 用途 | 烧写地址 |
           |---|---|---|
-          | \`komari-tdisplay-s3-${VERSION}-full.bin\` | 首次烧录 / 完整刷机 | \`0x0\` |
-          | \`komari-tdisplay-s3-${VERSION}-app.bin\` | 已装过本固件，仅升级应用 | \`0x10000\` |
+          | \`komari-tdisplay-s3-${VERSION}-full.bin\` | 首次烧录 / 完整刷机，**会清空已保存的 WiFi 和面板配置** | \`0x0\` |
+          | \`komari-tdisplay-s3-${VERSION}-app.bin\` | 已装过本固件，仅升级应用，保留配置 | \`0x10000\` |
+
+          两个文件的烧写地址不同，不要弄混。详细说明见 [README](https://github.com/${GITHUB_REPOSITORY}#下载固件)。
 
           这是通用固件，不含任何 WiFi 或面板配置。首次开机会进入屏幕配网：手机扫屏幕上的二维码连接热点 \`Komari-Setup-XXXX\`，在弹出的网页里选择 WiFi、输入密码并填写 Komari 面板地址。
 
