@@ -5,6 +5,8 @@
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
+#include <WebServer.h>
+#include <DNSServer.h>
 #include <ArduinoJson.h>
 #include <Preferences.h>
 #include <TFT_eSPI.h>
@@ -16,7 +18,21 @@
 #include "fonts/Nunito12.h"
 #include "fonts/Nunito14.h"
 #include "fonts/Nunito26.h"
+#include "qrcode.h"  // ESP-IDF 自带的二维码编码器
 
+// config.h 里的 WiFi / Komari 只是默认值；屏幕配网保存后以 NVS 里的为准
+#ifndef WIFI_SSID
+#define WIFI_SSID ""
+#endif
+#ifndef WIFI_PASSWORD
+#define WIFI_PASSWORD ""
+#endif
+#ifndef KOMARI_URL
+#define KOMARI_URL ""
+#endif
+#ifndef KOMARI_API_KEY
+#define KOMARI_API_KEY ""
+#endif
 #ifndef PING_TASK_NAME
 #define PING_TASK_NAME ""
 #endif
@@ -74,6 +90,9 @@ static volatile int current = 0;
 static String lastError;
 static uint32_t lastOkMs = 0;
 static String savedUuid;
+
+// 生效中的配置：NVS（配网页面保存的）优先，其次是 config.h
+static String cfgSsid, cfgPass, cfgUrl, cfgKey;
 
 static TFT_eSPI tft;
 static TFT_eSprite spr(&tft);
@@ -147,18 +166,18 @@ static bool rpcCall(const char *method, JsonDocument &doc, String &lastError) {
     lastError = "WiFi disconnected";
     return false;
   }
-  String url = String(KOMARI_URL) + "/api/rpc2";
+  String url = cfgUrl + "/api/rpc2";
   bool tls = url.startsWith("https://");
   http.setReuse(true);
   http.setConnectTimeout(5000);
   http.setTimeout(6000);
   bool ok = tls ? http.begin(tlsClient, url) : http.begin(plainClient, url);
   if (!ok) {
-    lastError = "bad KOMARI_URL";
+    lastError = "bad Komari URL";
     return false;
   }
   http.addHeader("Content-Type", "application/json");
-  if (strlen(KOMARI_API_KEY) > 0) http.addHeader("Authorization", String("Bearer ") + KOMARI_API_KEY);
+  if (cfgKey.length()) http.addHeader("Authorization", "Bearer " + cfgKey);
 
   String body = String("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"") + method + "\",\"params\":{}}";
   int code = http.POST(body);
@@ -536,12 +555,14 @@ static void drawDashboard() {
 // ---------------- 按键 ----------------
 struct Button {
   int pin;
-  explicit Button(int p) : pin(p) {}
+  uint32_t longMs;
+  Button(int p, uint32_t l) : pin(p), longMs(l) {}
   bool down = false;
   uint32_t since = 0;
   bool longFired = false;
 };
-static Button btnPrev{PIN_BTN_PREV}, btnNext{PIN_BTN_NEXT};
+static Button btnPrev{PIN_BTN_PREV, 700};    // KEY：长按 0.7 秒切换亮度
+static Button btnNext{PIN_BTN_NEXT, 3000};   // BOOT：长按 3 秒进入配网
 
 static void setBrightness(int i) {
   brightnessIdx = i % sizeof(BRIGHTNESS);
@@ -566,7 +587,7 @@ static int pollButton(Button &b) {
     b.down = true;
     b.since = now;
     b.longFired = false;
-  } else if (pressed && b.down && !b.longFired && now - b.since > 700) {
+  } else if (pressed && b.down && !b.longFired && now - b.since > b.longMs) {
     b.longFired = true;
     ev = 2;
   } else if (!pressed && b.down) {
@@ -574,6 +595,254 @@ static int pollButton(Button &b) {
     if (!b.longFired && now - b.since > 30) ev = 1;
   }
   return ev;
+}
+
+
+// ---------------- 配置 ----------------
+static String prefOr(const char *key, const char *def) {
+  return prefs.isKey(key) ? prefs.getString(key, def) : String(def);
+}
+
+static void loadConfig() {
+  cfgSsid = prefOr("wifi_ssid", WIFI_SSID);
+  cfgPass = prefOr("wifi_pass", WIFI_PASSWORD);
+  cfgUrl = prefOr("url", KOMARI_URL);
+  cfgKey = prefOr("key", KOMARI_API_KEY);
+  if (cfgSsid == "your-wifi") cfgSsid = "";  // config.example.h 的占位值
+  while (cfgUrl.endsWith("/")) cfgUrl.remove(cfgUrl.length() - 1);
+}
+
+// ---------------- 配网：热点 + 强制门户 ----------------
+// 手机扫屏幕上的二维码连上热点，系统会自动弹出配网页面（也可以手动打开 192.168.4.1）
+static WebServer web(80);
+static DNSServer dns;
+static String scanJson = "[]";
+static String apName;
+static uint32_t restartAt = 0;
+
+static const char PORTAL_HTML[] PROGMEM = R"HTML(<!DOCTYPE html>
+<html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Komari 副屏配网</title><style>
+body{margin:0;background:#111;color:#eee;font:16px -apple-system,system-ui,sans-serif}
+main{max-width:420px;margin:0 auto;padding:20px 16px}
+h1{font-size:20px;margin:0 0 4px}p.s{color:#888;margin:0 0 20px;font-size:14px}
+label{display:block;margin:16px 0 6px;color:#aaa;font-size:14px}
+select,input[type=text],input[type=password],input[type=url]{width:100%;box-sizing:border-box;padding:12px;border:1px solid #333;border-radius:8px;background:#1c1c1c;color:#eee;font-size:16px}
+.row{display:flex;gap:8px}.row select{flex:1}
+button{padding:12px 14px;border:0;border-radius:8px;background:#333;color:#eee;font-size:16px}
+button.go{width:100%;margin-top:24px;background:#3a7bd5;font-weight:600}
+.chk{display:flex;align-items:center;gap:6px;margin-top:8px;color:#aaa;font-size:14px}
+details{margin-top:20px;border-top:1px solid #222;padding-top:12px}summary{color:#aaa}
+#m{display:none;margin-top:8px}
+</style></head><body><main>
+<h1>Komari 副屏配网</h1><p class="s">选择 WiFi 并输入密码，保存后设备会自动重启（仅支持 2.4GHz）</p>
+<form method="POST" action="/save">
+<label>WiFi</label>
+<div class="row"><select id="s" name="ssid" onchange="sel()"><option>扫描中…</option></select>
+<button type="button" onclick="scan(1)">刷新</button></div>
+<input type="text" id="m" name="manual" placeholder="手动输入 WiFi 名称">
+<label>密码</label>
+<input type="password" id="p" name="pass" autocomplete="off">
+<div class="chk"><input type="checkbox" id="sp" onclick="p.type=this.checked?'text':'password'"><label for="sp" style="margin:0">显示密码</label></div>
+<details id="k"><summary>Komari 面板设置</summary>
+<label>面板地址</label><input type="url" name="url" id="u" placeholder="https://status.example.com">
+<label>API Key</label><input type="password" name="key" id="key" autocomplete="off">
+<div class="chk"><input type="checkbox" name="clearkey" id="ck" value="1"><label for="ck" style="margin:0">清除已保存的 API Key</label></div>
+</details>
+<button class="go">保存并重启</button>
+</form></main><script>
+const C=%CFG%,s=document.getElementById('s'),m=document.getElementById('m'),p=document.getElementById('p');
+document.getElementById('u').value=C.url;
+document.getElementById('key').placeholder=C.hasKey?'已保存，留空则不修改':'公开站点可留空';
+if(!C.url)document.getElementById('k').open=true;
+function bars(r){return r>-55?'▂▄▆█':r>-67?'▂▄▆':r>-78?'▂▄':'▂'}
+function sel(){const o=s.value==='__manual__';m.style.display=o?'block':'none';
+p.placeholder=(!o&&s.value===C.ssid&&C.ssid)?'已保存，留空则不修改':(s.selectedOptions[0]&&s.selectedOptions[0].dataset.open?'开放网络，无需密码':'')}
+function fill(list){s.innerHTML='';let hit=false;
+for(const n of list){const o=document.createElement('option');o.value=n.s;
+o.textContent=n.s+'  '+bars(n.r)+(n.l?'  🔒':'');if(!n.l)o.dataset.open=1;
+if(n.s===C.ssid){o.selected=true;hit=true}s.appendChild(o)}
+const o=document.createElement('option');o.value='__manual__';o.textContent='其他网络（手动输入）…';s.appendChild(o);
+if(!hit&&C.ssid){o.selected=true;m.value=C.ssid}else if(!list.length)o.selected=true;sel()}
+function scan(r){s.innerHTML='<option>扫描中…</option>';fetch('/scan'+(r?'?refresh=1':'')).then(x=>x.json()).then(fill).catch(()=>fill([]))}
+scan(0);
+</script></body></html>)HTML";
+
+static void scanWifi() {
+  int n = WiFi.scanNetworks();
+  std::vector<int> best;  // 同名 WiFi 只保留信号最强的
+  for (int i = 0; i < n; i++) {
+    if (WiFi.SSID(i).isEmpty()) continue;
+    bool dup = false;
+    for (int &j : best) {
+      if (WiFi.SSID(j) != WiFi.SSID(i)) continue;
+      dup = true;
+      if (WiFi.RSSI(i) > WiFi.RSSI(j)) j = i;
+    }
+    if (!dup) best.push_back(i);
+  }
+  std::sort(best.begin(), best.end(), [](int a, int b) { return WiFi.RSSI(a) > WiFi.RSSI(b); });
+  JsonDocument doc;
+  JsonArray arr = doc.to<JsonArray>();
+  for (int i : best) {
+    JsonObject o = arr.add<JsonObject>();
+    o["s"] = WiFi.SSID(i);
+    o["r"] = WiFi.RSSI(i);
+    o["l"] = WiFi.encryptionType(i) != WIFI_AUTH_OPEN;
+  }
+  scanJson = "";
+  serializeJson(doc, scanJson);
+  WiFi.scanDelete();
+}
+
+static String htmlEscape(const String &in) {
+  String out;
+  for (char c : in) {
+    if (c == '<') out += "&lt;";
+    else if (c == '>') out += "&gt;";
+    else if (c == '&') out += "&amp;";
+    else out += c;
+  }
+  return out;
+}
+
+static void sendPage(const String &title, const String &msg) {
+  web.send(200, "text/html; charset=utf-8",
+           "<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
+           "<style>body{background:#111;color:#eee;font:16px system-ui,sans-serif;padding:32px 16px;text-align:center}a{color:#6af}</style></head><body><h2>" +
+               title + "</h2><p>" + msg + "</p></body></html>");
+}
+
+static void handleRoot() {
+  JsonDocument cfg;
+  cfg["ssid"] = cfgSsid;
+  cfg["url"] = cfgUrl;
+  cfg["hasKey"] = cfgKey.length() > 0;
+  String json;
+  serializeJson(cfg, json);
+  json.replace("<", "\\u003c");  // 防止 </script> 截断
+  String page = FPSTR(PORTAL_HTML);
+  page.replace("%CFG%", json);
+  web.send(200, "text/html; charset=utf-8", page);
+}
+
+static void handleSave() {
+  String ssid = web.arg("ssid");
+  if (ssid == "__manual__") ssid = web.arg("manual");
+  String pass = web.arg("pass");
+  String url = web.arg("url");
+  url.trim();
+  while (url.endsWith("/")) url.remove(url.length() - 1);
+  String key = web.arg("key");
+  key.trim();
+
+  if (ssid.isEmpty()) return sendPage("请选择 WiFi", "<a href='/'>返回</a>");
+  if (url.length() && !url.startsWith("http://") && !url.startsWith("https://"))
+    return sendPage("面板地址需要以 http:// 或 https:// 开头", "<a href='/'>返回</a>");
+  if (pass.isEmpty() && ssid == cfgSsid) pass = cfgPass;  // 同一个 WiFi 不重输密码
+
+  prefs.putString("wifi_ssid", ssid);
+  prefs.putString("wifi_pass", pass);
+  if (url.length()) prefs.putString("url", url);
+  if (web.arg("clearkey") == "1") prefs.putString("key", "");
+  else if (key.length()) prefs.putString("key", key);
+
+  sendPage("已保存", "设备正在重启并连接 <b>" + htmlEscape(ssid) + "</b>，可以关闭此页面。");
+  restartAt = millis() + 1500;
+}
+
+// ---- 二维码 ----
+static uint8_t qrModules[57 * 57];  // 最大支持版本 10
+static int qrSize = 0;
+
+static void qrCapture(esp_qrcode_handle_t q) {
+  qrSize = esp_qrcode_get_size(q);
+  for (int y = 0; y < qrSize; y++)
+    for (int x = 0; x < qrSize; x++) qrModules[y * qrSize + x] = esp_qrcode_get_module(q, x, y);
+}
+
+static void drawQr(int x, int y, int maxPx) {
+  if (!qrSize) return;
+  const int quiet = 2;
+  int px = maxPx / (qrSize + 2 * quiet);
+  int total = px * (qrSize + 2 * quiet);
+  spr.fillRect(x, y, total, total, TFT_WHITE);
+  for (int my = 0; my < qrSize; my++)
+    for (int mx = 0; mx < qrSize; mx++)
+      if (qrModules[my * qrSize + mx]) spr.fillRect(x + (mx + quiet) * px, y + (my + quiet) * px, px, px, TFT_BLACK);
+}
+
+static void drawPortal(const String &reason) {
+  spr.fillSprite(C_BG);
+  drawQr(8, 8, 154);
+  const int x = 172;
+  text("WiFi Setup", x, 6, C_FG);
+  spr.setViewport(x, 28, W - x - 6, 18);
+  text(reason, 0, 0, C_WARN, TL_DATUM, F_SMALL);
+  spr.resetViewport();
+  text("1. Scan QR to join", x, 52, C_DIM, TL_DATUM, F_SMALL);
+  text(apName, x, 68, C_FG);
+  text("2. Open in browser", x, 94, C_DIM, TL_DATUM, F_SMALL);
+  text("192.168.4.1", x, 110, C_FG);
+  int clients = WiFi.softAPgetStationNum();
+  if (clients > 0) {
+    spr.fillRect(x, 145, 7, 7, C_OK);
+    text("phone connected", x + 12, 139, C_OK, TL_DATUM, F_SMALL);
+  } else if (cfgSsid.length()) {
+    text("KEY: retry WiFi", x, 139, C_DIM, TL_DATUM, F_SMALL);
+  }
+  spr.pushSprite(0, 0);
+}
+
+// 进入后不再返回：保存配置、按 KEY 或超时后重启
+[[noreturn]] static void runPortal(const String &reason) {
+  uint8_t mac[6];
+  WiFi.macAddress(mac);
+  char name[24];
+  snprintf(name, sizeof name, "Komari-Setup-%02X%02X", mac[4], mac[5]);
+  apName = name;
+
+  drawMessage("WiFi Setup", "scanning networks...");
+  WiFi.disconnect(true);
+  WiFi.mode(WIFI_AP_STA);
+  scanWifi();
+  WiFi.softAP(apName.c_str());
+  delay(100);
+  dns.start(53, "*", WiFi.softAPIP());
+
+  String wifiQr = "WIFI:T:nopass;S:" + apName + ";;";
+  esp_qrcode_config_t qcfg = {qrCapture, 10, ESP_QRCODE_ECC_MED};
+  esp_qrcode_generate(&qcfg, wifiQr.c_str());
+
+  web.on("/", HTTP_GET, handleRoot);
+  web.on("/save", HTTP_POST, handleSave);
+  web.on("/scan", HTTP_GET, [] {
+    if (web.hasArg("refresh")) scanWifi();
+    web.send(200, "application/json", scanJson);
+  });
+  // 其余请求（包括手机系统的联网检测）一律跳到配网页，触发自动弹窗
+  web.onNotFound([] {
+    web.sendHeader("Location", "http://192.168.4.1/", true);
+    web.send(302, "text/plain", "");
+  });
+  web.begin();
+
+  uint32_t lastDraw = 0, lastClient = millis();
+  for (;;) {
+    dns.processNextRequest();
+    web.handleClient();
+    if (WiFi.softAPgetStationNum() > 0) lastClient = millis();
+    // 已配置过 WiFi（比如路由器临时断电）时，5 分钟没人连热点就重启重试
+    if (cfgSsid.length() && millis() - lastClient > 5 * 60 * 1000) ESP.restart();
+    if (restartAt && millis() > restartAt) ESP.restart();
+    if (pollButton(btnPrev) == 1 && cfgSsid.length()) ESP.restart();
+    pollButton(btnNext);
+    if (millis() - lastDraw > 500) {
+      lastDraw = millis();
+      drawPortal(reason);
+    }
+    delay(2);
+  }
 }
 
 // ---------------- 入口 ----------------
@@ -604,18 +873,28 @@ void setup() {
   dataMutex = xSemaphoreCreateMutex();
   tlsClient.setInsecure();  // 不校验证书；只读监控数据，够用
 
-  drawMessage("WiFi", String("connecting ") + WIFI_SSID);
+  loadConfig();
+  if (prefs.getBool("portal", false)) {  // 运行中长按 BOOT 3 秒触发
+    prefs.putBool("portal", false);
+    runPortal("Setup requested");
+  }
+  if (cfgSsid.isEmpty()) runPortal("No WiFi configured");
+
+  drawMessage("WiFi", "connecting " + cfgSsid);
   WiFi.mode(WIFI_STA);
   WiFi.setAutoReconnect(true);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  WiFi.begin(cfgSsid.c_str(), cfgPass.c_str());
   uint32_t t0 = millis();
   while (WiFi.status() != WL_CONNECTED) {
     delay(200);
-    if (millis() - t0 > 30000) {
-      drawMessage("WiFi", "connect failed, retrying...");
-      WiFi.disconnect();
-      WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-      t0 = millis();
+    // 连不上（密码错、WiFi 不在了）就进入配网；连接中长按 BOOT 也可以直接进入
+    if (millis() - t0 > 20000) runPortal("Can't connect: " + cfgSsid);
+    if (digitalRead(PIN_BTN_NEXT) == LOW && millis() - t0 > 500) {
+      uint32_t held = millis();
+      while (digitalRead(PIN_BTN_NEXT) == LOW) {
+        if (millis() - held > 3000) runPortal("Setup requested");
+        delay(10);
+      }
     }
   }
   configTzTime(TIMEZONE, "ntp.aliyun.com", "pool.ntp.org", "time.cloudflare.com");
@@ -629,6 +908,12 @@ void loop() {
   int en = pollButton(btnNext);
   if (ep == 1) switchNode(-1);
   if (en == 1) switchNode(+1);
+  if (en == 2) {  // 长按 BOOT 3 秒：重启进入配网
+    prefs.putBool("portal", true);
+    drawMessage("WiFi Setup", "restarting...");
+    delay(300);
+    ESP.restart();
+  }
   if (ep == 2) {  // 长按 KEY 切换亮度
     setBrightness(brightnessIdx + 1);
     prefs.putUChar("bl", brightnessIdx);

@@ -2,8 +2,9 @@
 // 复制本文件为 config.h 并填写。config.h 不要提交到公开仓库。
 
 // ---- WiFi（ESP32 只支持 2.4GHz）----
-#define WIFI_SSID      "your-wifi"
-#define WIFI_PASSWORD  "your-password"
+// 可以留空：开机后进入屏幕配网，用手机选择 WiFi 并输入密码
+#define WIFI_SSID      ""
+#define WIFI_PASSWORD  ""
 
 // ---- Komari ----
 // 面板地址，不要以 / 结尾。http:// 和 https:// 都可以

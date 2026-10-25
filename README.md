@@ -22,11 +22,35 @@
 - 文字使用抗锯齿圆体 Nunito（SIL OFL 开源授权），数字等宽不跳动；改字体或字号：编辑 `tools/make_vlw.py` 后运行 `python3 tools/make_vlw.py`（需要 Pillow）
 - 在线状态用实心方块表示：绿色在线，红色离线
 - 柱状图是最近约 65 秒的网速（亮色为下行，暗色为上行），所有机器都在后台记录，切换后马上有图
-- **KEY 键（GPIO14）**：上一台；**BOOT 键（GPIO0）**：下一台；**长按 KEY**：切换 4 档亮度（默认充电口在右侧摆放）
+- **KEY 键（GPIO14）**：上一台；**BOOT 键（GPIO0）**：下一台；**长按 KEY**：切换 4 档亮度；**长按 BOOT 3 秒**：进入配网（默认充电口在右侧摆放）
+- **屏幕配网**：手机扫码连上设备热点，在网页里选择附近的 WiFi、输入密码，也可以改 Komari 地址和 API Key，不用重新编译
 - 记住上次看的机器和亮度，重启后恢复
 - 节点按 Komari 后台的权重排序；隐藏节点只有填了 API Key 才会显示
 - CPU/RAM/DISK ≥75% 显示橙色，≥90% 显示红色；快到期（≤7 天）、丢包高时也会变色
 - 连不上面板时屏幕底部会显示红条，写明原因（HTTP 401、WiFi 断开等）
+
+## 配网
+
+以下情况设备会进入配网模式：
+
+- 第一次开机，还没有配置 WiFi
+- 20 秒内连不上已保存的 WiFi（比如密码改了、换了路由器）
+- 运行中**长按 BOOT 键 3 秒**，或开机连接 WiFi 时长按 BOOT 键 3 秒
+
+配网步骤：
+
+1. 屏幕左边会显示一个二维码，用手机相机扫码，连上设备热点 `Komari-Setup-XXXX`（开放热点，没有密码）。也可以在手机 WiFi 设置里手动连
+2. 连上后手机一般会自动弹出配网页面；没弹出的话，用浏览器打开 `http://192.168.4.1`
+3. 从列表里选择附近的 WiFi（按信号强弱排序，🔒 表示需要密码），输入密码。隐藏网络选「其他网络（手动输入）」
+4. 需要的话，展开「Komari 面板设置」修改面板地址和 API Key
+5. 点「保存并重启」，设备会自动连接新的 WiFi
+
+补充说明：
+
+- 如果没换 WiFi、只想改面板地址，密码可以留空，会沿用已保存的密码；API Key 留空同样表示不修改
+- 配网页面保存的设置优先于 `config.h`，所以 `config.h` 里的 WiFi 和 Komari 配置可以留空，同一个固件可以给不同的人用
+- 配网模式下按 **KEY** 键会退出配网，重新连接已保存的 WiFi；5 分钟没有手机连上热点，也会自动重启重试，防止路由器临时断电后一直卡在配网
+- 只支持 2.4GHz WiFi
 
 ## 数据来源
 
@@ -71,8 +95,8 @@ cp include/config.example.h include/config.h
 
 | 配置项 | 说明 |
 |---|---|
-| `WIFI_SSID` / `WIFI_PASSWORD` | 2.4GHz WiFi 的名称和密码 |
-| `KOMARI_URL` | Komari 面板地址，例如 `https://status.example.com`，结尾不要带 `/` |
+| `WIFI_SSID` / `WIFI_PASSWORD` | 2.4GHz WiFi 的名称和密码。可以留空，开机后用屏幕配网设置 |
+| `KOMARI_URL` | Komari 面板地址，例如 `https://status.example.com`，结尾不要带 `/`。也可以在配网页面里填 |
 | `KOMARI_API_KEY` | 在 Komari 后台设置里生成。公开站点可以留空；开了私有站点或想显示隐藏节点时必须填 |
 | `PING_TASK_NAME` | 留空则显示每台机器的第一个延迟检测任务，也可以填任务名固定显示某一个 |
 | `TIMEZONE` | POSIX 时区，中国大陆填 `CST-8` |
@@ -130,7 +154,7 @@ pio pkg exec -p tool-esptoolpy -- esptool.py --chip esp32s3 merge_bin \
   0x10000 .pio/build/tdisplay-s3/firmware.bin
 ```
 
-> ⚠️ 合并后的 bin 包含你在 `config.h` 里填的 WiFi 密码和 API Key，不要公开分享。`release/` 已在 `.gitignore` 里。
+> ⚠️ 合并后的 bin 包含你在 `config.h` 里填的 WiFi 密码和 API Key，不要公开分享。`release/` 已在 `.gitignore` 里。想做一个能公开分享的通用固件，把 `config.h` 里的 WiFi、Komari 地址和 API Key 都留空再编译，拿到固件的人用屏幕配网填写自己的设置。
 
 烧写这个 bin 有三种方式：
 
