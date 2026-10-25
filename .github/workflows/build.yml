@@ -1,0 +1,103 @@
+# 编译固件；推送 v* 标签时自动发布 Release
+#
+#   发布新版本：git tag v1.0.0 && git push origin v1.0.0
+#   只编译不发布：在 Actions 页面手动运行（Run workflow），产物在运行详情的 Artifacts 里
+#
+# CI 使用 config.example.h（WiFi / Komari 都留空），编出来的是通用固件，
+# 首次开机进入屏幕配网，不含任何个人配置，可以公开分发。
+name: Build firmware
+
+on:
+  push:
+    tags: ["v*"]
+    branches: [main]
+    paths:
+      - "src/**"
+      - "include/**"
+      - "platformio.ini"
+      - ".github/workflows/build.yml"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio/.cache
+            ~/.platformio/packages
+            ~/.platformio/platforms
+          key: pio-${{ runner.os }}-${{ hashFiles('platformio.ini') }}
+
+      - name: Install PlatformIO
+        run: pip install -U platformio
+
+      - name: Use generic config
+        run: cp include/config.example.h include/config.h
+
+      - name: Build
+        run: pio run
+
+      - name: Package
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          [[ "$GITHUB_REF_TYPE" == "tag" ]] || VERSION="dev-${GITHUB_SHA::7}"
+          BUILD=.pio/build/tdisplay-s3
+          mkdir -p dist
+          # 合并 bin：启动程序 + 分区表 + boot_app0 + 应用，从 0x0 烧写
+          pio pkg exec -p tool-esptoolpy -- esptool.py --chip esp32s3 merge_bin \
+            -o "dist/komari-tdisplay-s3-${VERSION}-full.bin" \
+            --flash_mode keep --flash_freq keep --flash_size keep \
+            0x0 "$BUILD/bootloader.bin" \
+            0x8000 "$BUILD/partitions.bin" \
+            0xe000 ~/.platformio/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin \
+            0x10000 "$BUILD/firmware.bin"
+          # 仅应用分区：已经刷过本固件、只想升级时烧到 0x10000
+          cp "$BUILD/firmware.bin" "dist/komari-tdisplay-s3-${VERSION}-app.bin"
+          (cd dist && sha256sum *.bin > SHA256SUMS.txt)
+          ls -l dist
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: komari-tdisplay-s3-${{ env.VERSION }}
+          path: dist/*
+
+      - name: Publish release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat > notes.md <<EOF
+          ## 固件文件
+
+          | 文件 | 用途 | 烧写地址 |
+          |---|---|---|
+          | \`komari-tdisplay-s3-${VERSION}-full.bin\` | 首次烧录 / 完整刷机 | \`0x0\` |
+          | \`komari-tdisplay-s3-${VERSION}-app.bin\` | 已装过本固件，仅升级应用 | \`0x10000\` |
+
+          这是通用固件，不含任何 WiFi 或面板配置。首次开机会进入屏幕配网：手机扫屏幕上的二维码连接热点 \`Komari-Setup-XXXX\`，在弹出的网页里选择 WiFi、输入密码并填写 Komari 面板地址。
+
+          ## 烧录
+
+          - 网页：用 Chrome / Edge 打开 [ESP Tool](https://espressif.github.io/esptool-js/)，连接开发板，地址填 \`0x0\`，选择 \`-full.bin\`
+          - 命令行：\`esptool.py --chip esp32s3 write_flash 0x0 komari-tdisplay-s3-${VERSION}-full.bin\`
+
+          连不上开发板时：按住 BOOT，按一下 RST，松开 BOOT 进入下载模式。
+          EOF
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file notes.md \
+            --generate-notes

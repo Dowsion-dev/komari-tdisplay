@@ -16,6 +16,15 @@
 └────────────────────────────────┴─────────────┘
 ```
 
+## 下载固件
+
+不想自己编译的话，直接到 [Releases](https://github.com/Dowsion-dev/komari-tdisplay/releases) 下载：
+
+- `komari-tdisplay-s3-<版本>-full.bin`：首次烧录用，从地址 `0x0` 烧写
+- `komari-tdisplay-s3-<版本>-app.bin`：已经装过本固件、只想升级时用，烧到 `0x10000`
+
+Release 里的是通用固件，不含任何个人配置，开机后用[屏幕配网](#配网)设置 WiFi 和 Komari 面板。烧录方法见[烧录](#5-烧录)和[导出单文件固件](#7-导出单文件固件可选)两节。
+
 ## 功能
 
 - 每秒拉一次 Komari 数据，时钟实时走；机器名和 CPU 型号放不下时自动横向滚动
@@ -165,7 +174,21 @@ pio pkg exec -p tool-esptoolpy -- esptool.py --chip esp32s3 merge_bin \
 - **网页**：用 Chrome 或 Edge 打开 [ESP Tool](https://espressif.github.io/esptool-js/)，点 Connect 选择开发板，地址填 `0x0`，选择 bin 文件后点 Program
 - **Windows**：乐鑫的 Flash Download Tool，芯片选 ESP32-S3，地址填 `0x0`
 
-### 8. 修改字体（可选）
+### 8. 发布新版本（维护者）
+
+仓库里的 GitHub Actions（`.github/workflows/build.yml`）会自动编译：
+
+- 推送到 `main`（改了源码或配置）和提交 PR 时，只编译并上传产物，可以在 Actions 运行详情的 Artifacts 里下载
+- 推送 `v` 开头的标签时，编译后自动创建 Release，附带 `-full.bin`、`-app.bin` 和 `SHA256SUMS.txt`
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+CI 编译时用的是 `config.example.h`，所以发布出去的固件不会包含你本地 `config.h` 里的任何配置。
+
+### 9. 修改字体（可选）
 
 字库由 `tools/make_vlw.py` 从 `tools/fonts/` 里的 TTF 生成。改字号或字重时，编辑脚本开头的 `FONTS` 列表，然后运行：
 
