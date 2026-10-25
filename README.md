@@ -18,10 +18,18 @@
 
 ## 下载固件
 
-不想自己编译的话，直接到 [Releases](https://github.com/Dowsion-dev/komari-tdisplay/releases) 下载：
+不想自己编译的话，直接到 [Releases](https://github.com/Dowsion-dev/komari-tdisplay/releases) 下载。每个版本有两个固件文件：
 
-- `komari-tdisplay-s3-<版本>-full.bin`：首次烧录用，从地址 `0x0` 烧写
-- `komari-tdisplay-s3-<版本>-app.bin`：已经装过本固件、只想升级时用，烧到 `0x10000`
+| 文件 | 包含内容 | 烧写地址 | 已保存的配置 | 什么时候用 |
+|---|---|---|---|---|
+| `komari-tdisplay-s3-<版本>-full.bin` | 启动程序 + 分区表 + OTA 引导数据 + 应用 | `0x0` | **会被清空** | 第一次烧录；之前刷过别的固件；设备启动异常需要完整重刷；想恢复出厂 |
+| `komari-tdisplay-s3-<版本>-app.bin` | 只有应用 | `0x10000` | 保留 | 已经在用本固件，只想升级到新版本 |
+
+> ⚠️ 两个文件的烧写地址不同，不要弄混：`full.bin` 烧到 `0x10000` 或 `app.bin` 烧到 `0x0`，设备都无法启动。重新按正确地址烧一次 `full.bin` 就能恢复。
+
+**full.bin 为什么会清空配置**：`full.bin` 是把几个分区合并成的一个连续文件，从 `0x0` 一直覆盖到应用结尾。中间 `0x9000–0xDFFF` 是 NVS 存储区，合并时被填成了空白，所以烧写后，配网保存的 WiFi 和 Komari 设置、亮度、上次查看的机器都会被抹掉，开机重新进入配网。`app.bin` 只写应用分区，NVS 不受影响，升级后直接用原来的设置联网。
+
+**其他文件**：`SHA256SUMS.txt` 是校验值，下载后可以运行 `shasum -a 256 -c SHA256SUMS.txt`（Linux 用 `sha256sum -c SHA256SUMS.txt`）确认文件完整。
 
 Release 里的是通用固件，不含任何个人配置，开机后用[屏幕配网](#配网)设置 WiFi 和 Komari 面板。烧录方法见[烧录](#5-烧录)和[导出单文件固件](#7-导出单文件固件可选)两节。
 
