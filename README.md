@@ -2,6 +2,10 @@
 
 照 NodeSeek 帖子 post-798692 的 Sparkline TUI 布局做的 Komari 探针固件。
 
+| Komari 面板 | 屏幕配网 |
+|---|---|
+| ![Komari 面板](docs/images/dashboard.jpg) | ![屏幕配网](docs/images/wifi-setup.jpg) |
+
 ```
 ┌──────────────────────────────────────────────┐
 │ DMIT                           1/3  14:30:05 │
