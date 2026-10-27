@@ -69,7 +69,7 @@ static const int HIST = 120;
 struct Node {
   String uuid, name, cpu;
   int weight = 0;
-  time_t expire = 0;  // 0 = 未设置
+  int64_t expire = 0;  // Unix 秒，0 = 未设置。不用 time_t：它在这块板子上是 32 位，2038 年后会溢出
 
   bool hasStatus = false;
   bool online = false;
@@ -112,7 +112,7 @@ static int64_t daysFromCivil(int y, unsigned m, unsigned d) {
 }
 
 // 解析 "2026-12-01T00:00:00Z" / "2026-12-01T00:00:00.123+08:00"
-static time_t parseIso8601(const char *s) {
+static int64_t parseIso8601(const char *s) {
   if (!s || !*s) return 0;
   int Y, M, D, h = 0, mi = 0, sec = 0;
   if (sscanf(s, "%d-%d-%dT%d:%d:%d", &Y, &M, &D, &h, &mi, &sec) < 3) return 0;
@@ -129,7 +129,7 @@ static time_t parseIso8601(const char *s) {
       t -= (*tz == '+') ? off : -off;
     }
   }
-  return (time_t)t;
+  return t;
 }
 
 // 380M / 4.1G / 16.8G
@@ -205,13 +205,31 @@ static bool rpcCall(const char *method, JsonDocument &doc, String &lastError) {
   return true;
 }
 
+// 和主页保持一致要排除的节点：
+// - Komari 后台勾了「隐藏」的（用 API Key 访问时接口仍会返回它们）
+// - 主题设置里的 hiddenNodes（horizon 等主题在前端自行隐藏，接口不会过滤）
+static std::vector<String> themeHiddenNodes() {
+  std::vector<String> out;
+  JsonDocument doc;
+  String ignored;
+  if (!rpcCall("common:getPublicInfo", doc, ignored)) return out;  // 拿不到就不过滤，不影响主流程
+  for (JsonVariant v : doc["result"]["theme_settings"]["hiddenNodes"].as<JsonArray>()) {
+    const char *uuid = v.as<const char *>();
+    if (uuid) out.push_back(uuid);
+  }
+  return out;
+}
+
 static bool fetchNodes(String &err) {
+  std::vector<String> hidden = themeHiddenNodes();
   JsonDocument doc;
   if (!rpcCall("common:getNodes", doc, err)) return false;
 
   std::vector<Node> fresh;
   for (JsonPair kv : doc["result"].as<JsonObject>()) {
     JsonObject o = kv.value().as<JsonObject>();
+    if (o["hidden"] | false) continue;
+    if (std::find(hidden.begin(), hidden.end(), String(kv.key().c_str())) != hidden.end()) continue;
     Node n;
     n.uuid = kv.key().c_str();
     n.name = (const char *)(o["name"] | "");
@@ -234,7 +252,7 @@ static bool fetchNodes(String &err) {
       if (old.uuid != n.uuid) continue;
       String name = n.name, cpu = n.cpu;
       int weight = n.weight;
-      time_t expire = n.expire;
+      int64_t expire = n.expire;
       n = old;
       n.name = name; n.cpu = cpu; n.weight = weight; n.expire = expire;
       break;
@@ -474,7 +492,7 @@ static void drawDashboard() {
   drawMarquee(nameMarquee, n.name, L, 6, titleW, C_FG);
 
   // ---- 第二行：CPU 型号（滚动）/ 在线 / 到期 ----
-  time_t now = time(nullptr);
+  int64_t now = time(nullptr);
   String exp = "expire --";  // 仅在时间还没同步时出现
   uint16_t expColor = C_DIM;
   if (n.expire == 0) {
